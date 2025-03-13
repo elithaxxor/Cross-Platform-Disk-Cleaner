@@ -68,17 +68,37 @@ get_system_info() {
     CURRENT_USER=$(whoami)
     UPTIME=$(uptime)
     
+    # Get CPU information
+    if [ "$OS_TYPE" = "Darwin" ]; then
+        # macOS
+        CPU_MODEL=$(sysctl -n machdep.cpu.brand_string)
+        CPU_CORES=$(sysctl -n hw.physicalcpu)
+        CPU_THREADS=$(sysctl -n hw.logicalcpu)
+        RAM_TOTAL=$(sysctl -n hw.memsize | awk '{print $0/1073741824}')
+        RAM_TOTAL=$(printf "%.2f GB" $RAM_TOTAL)
+    else
+        # Linux
+        CPU_MODEL=$(grep "model name" /proc/cpuinfo | head -n 1 | cut -d ":" -f 2 | sed 's/^[ \t]*//')
+        CPU_CORES=$(grep -c "^processor" /proc/cpuinfo)
+        CPU_THREADS=$CPU_CORES
+        RAM_TOTAL=$(free -h | grep Mem | awk '{print $2}')
+    fi
+    
     # Get network information
     if [ "$OS_TYPE" = "Darwin" ]; then
         # macOS
         IP_ADDRESS=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}' | head -n 1)
         MAC_ADDRESS=$(ifconfig en0 | awk '/ether/{print $2}')
         WIRELESS_INTERFACE=$(networksetup -listallhardwareports | grep -A 1 "Wi-Fi" | grep "Device" | awk '{print $2}')
+        GATEWAY=$(netstat -nr | grep default | head -n 1 | awk '{print $2}')
+        NETWORK_NAME=$(networksetup -getairportnetwork en0 2>/dev/null | cut -d ":" -f 2 | sed 's/^[ \t]*//')
     else
         # Linux
         IP_ADDRESS=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -n 1)
         MAC_ADDRESS=$(ip link show | grep -oP '(?<=link/ether\s)([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | head -n 1)
         WIRELESS_INTERFACE=$(ip link show | grep -i wireless | cut -d: -f2 | awk '{print $1}' | head -n 1)
+        GATEWAY=$(ip route | grep default | head -n 1 | awk '{print $3}')
+        NETWORK_NAME=$(iwgetid -r 2>/dev/null)
     fi
     
     # Get disk information
@@ -98,35 +118,88 @@ get_system_info() {
         DISK_PERCENT=$(echo "$DISK_INFO" | awk '{print $5}')
     fi
     
-    # Output the information
-    echo -e "\n${GREEN}${BOLD}====== System Information ======${NC}"
+    # Output the information with colorful formatting
+    echo -e "\n${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║                   SYSTEM INFORMATION                         ║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    
+    echo -e "\n${YELLOW}${BOLD}⚙️  HARDWARE INFORMATION${NC}"
+    echo -e "${CYAN}${BOLD}CPU Model:${NC}        $CPU_MODEL"
+    echo -e "${CYAN}${BOLD}CPU Cores:${NC}        $CPU_CORES physical cores, $CPU_THREADS threads"
+    echo -e "${CYAN}${BOLD}RAM:${NC}              $RAM_TOTAL"
+    
+    echo -e "\n${YELLOW}${BOLD}💻 SYSTEM INFORMATION${NC}"
     echo -e "${CYAN}${BOLD}Operating System:${NC} $OS_TYPE $OS_VERSION"
-    echo -e "${CYAN}${BOLD}Hostname:${NC} $HOSTNAME"
-    echo -e "${CYAN}${BOLD}User:${NC} $CURRENT_USER"
-    echo -e "${CYAN}${BOLD}Date/Time:${NC} $(date)"
-    echo -e "${CYAN}${BOLD}Uptime:${NC} $UPTIME"
-    echo
-    echo -e "${GREEN}${BOLD}====== Network Information ======${NC}"
-    echo -e "${CYAN}${BOLD}IP Address:${NC} $IP_ADDRESS"
-    echo -e "${CYAN}${BOLD}MAC Address:${NC} $MAC_ADDRESS"
-    echo -e "${CYAN}${BOLD}Wireless Interface:${NC} $WIRELESS_INTERFACE"
-    echo
-    echo -e "${GREEN}${BOLD}====== Disk Information ======${NC}"
+    echo -e "${CYAN}${BOLD}Hostname:${NC}         $HOSTNAME"
+    echo -e "${CYAN}${BOLD}Username:${NC}         $CURRENT_USER"
+    echo -e "${CYAN}${BOLD}Date/Time:${NC}        $(date)"
+    echo -e "${CYAN}${BOLD}Uptime:${NC}           $UPTIME"
+    
+    echo -e "\n${YELLOW}${BOLD}🌐 NETWORK INFORMATION${NC}"
+    echo -e "${CYAN}${BOLD}IP Address:${NC}       $IP_ADDRESS"
+    echo -e "${CYAN}${BOLD}Gateway:${NC}          $GATEWAY"
+    echo -e "${CYAN}${BOLD}Network Name:${NC}     $NETWORK_NAME"
+    echo -e "${CYAN}${BOLD}MAC Address:${NC}      $MAC_ADDRESS"
+    echo -e "${CYAN}${BOLD}Interface:${NC}        $WIRELESS_INTERFACE"
+    
+    echo -e "\n${YELLOW}${BOLD}💾 DISK INFORMATION${NC}"
     echo -e "${CYAN}${BOLD}Total Disk Space:${NC} $DISK_TOTAL"
-    echo -e "${CYAN}${BOLD}Used Disk Space:${NC} $DISK_USED ($DISK_PERCENT)"
-    echo -e "${CYAN}${BOLD}Available Disk Space:${NC} $DISK_AVAIL"
-    echo
+    echo -e "${CYAN}${BOLD}Used Disk Space:${NC}  $DISK_USED ($DISK_PERCENT)"
+    echo -e "${CYAN}${BOLD}Available Space:${NC}  $DISK_AVAIL"
+    
+    # Create a horizontal bar chart for disk usage
+    local disk_percent_num=$(echo "$DISK_PERCENT" | tr -d '%')
+    local bar_length=50
+    local filled_length=$(($disk_percent_num * $bar_length / 100))
+    local empty_length=$(($bar_length - $filled_length))
+    
+    disk_bar="["
+    for ((i=0; i<$filled_length; i++)); do
+        disk_bar+="█"
+    done
+    for ((i=0; i<$empty_length; i++)); do
+        disk_bar+="░"
+    done
+    disk_bar+="] $DISK_PERCENT"
+    
+    # Color the bar based on disk usage
+    if [ "$disk_percent_num" -gt 90 ]; then
+        echo -e "${RED}${BOLD}Disk Usage:${NC}        $disk_bar ${RED}(CRITICAL)${NC}"
+    elif [ "$disk_percent_num" -gt 75 ]; then
+        echo -e "${YELLOW}${BOLD}Disk Usage:${NC}        $disk_bar ${YELLOW}(WARNING)${NC}"
+    else
+        echo -e "${GREEN}${BOLD}Disk Usage:${NC}        $disk_bar ${GREEN}(OK)${NC}"
+    fi
+    
+    echo -e "\n${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║                END OF SYSTEM INFORMATION                     ║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
     
     # Add information to the log file
     echo "OS Type: $OS_TYPE $OS_VERSION" >> "$OPERATIONS_LOG"
     echo "Hostname: $HOSTNAME" >> "$OPERATIONS_LOG"
     echo "User: $CURRENT_USER" >> "$OPERATIONS_LOG"
+    echo "CPU: $CPU_MODEL ($CPU_CORES cores, $CPU_THREADS threads)" >> "$OPERATIONS_LOG"
+    echo "RAM: $RAM_TOTAL" >> "$OPERATIONS_LOG"
     echo "Date/Time: $(date)" >> "$OPERATIONS_LOG"
     echo "IP Address: $IP_ADDRESS" >> "$OPERATIONS_LOG"
+    echo "Gateway: $GATEWAY" >> "$OPERATIONS_LOG"
+    echo "Network: $NETWORK_NAME" >> "$OPERATIONS_LOG"
     echo "MAC Address: $MAC_ADDRESS" >> "$OPERATIONS_LOG"
     echo "Wireless Interface: $WIRELESS_INTERFACE" >> "$OPERATIONS_LOG"
     echo "Disk Space: Total=$DISK_TOTAL, Used=$DISK_USED ($DISK_PERCENT), Available=$DISK_AVAIL" >> "$OPERATIONS_LOG"
     echo "=========================================" >> "$OPERATIONS_LOG"
+    
+    # Also add to the CWD log
+    echo "=== SYSTEM INFORMATION ===" >> "$CWD_LOG"
+    echo "OS: $OS_TYPE $OS_VERSION" >> "$CWD_LOG"
+    echo "Hostname: $HOSTNAME" >> "$CWD_LOG"
+    echo "CPU: $CPU_MODEL" >> "$CWD_LOG"
+    echo "RAM: $RAM_TOTAL" >> "$CWD_LOG"
+    echo "IP: $IP_ADDRESS" >> "$CWD_LOG"
+    echo "Gateway: $GATEWAY" >> "$CWD_LOG"
+    echo "Disk: Total=$DISK_TOTAL, Available=$DISK_AVAIL" >> "$CWD_LOG"
+    echo "=========================" >> "$CWD_LOG"
     
     # Press enter to continue
     read -p "Press Enter to continue..."
@@ -673,30 +746,62 @@ scan_wifi() {
 # Main menu function
 show_menu() {
     clear
-    echo -e "${GREEN}${BOLD}=================================${NC}"
-    echo -e "${GREEN}${BOLD}    SYSTEM CLEANUP UTILITY      ${NC}"
-    echo -e "${GREEN}${BOLD}=================================${NC}"
+    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║                 SYSTEM CLEANUP UTILITY                       ║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    
+    # Show system overview
     echo -e "${CYAN}${BOLD}Operating System:${NC} $(uname -s) $(uname -r)"
-    echo -e "${CYAN}${BOLD}User:${NC} $(whoami)"
-    echo -e "${CYAN}${BOLD}Date:${NC} $(date)"
-    echo -e "${GREEN}${BOLD}=================================${NC}"
-    echo -e "1. ${BOLD}System Information${NC}"
-    echo -e "2. ${BOLD}Analyze Disk Usage${NC}"
-    echo -e "3. ${BOLD}Clean User Cache${NC}"
-    echo -e "4. ${BOLD}Clean Temporary Files${NC}"
-    echo -e "5. ${BOLD}Clean Trash/Recycle Bin${NC}"
-    echo -e "6. ${BOLD}Clean Logs${NC}"
-    echo -e "7. ${BOLD}Wi-Fi Diagnostics${NC}"
+    echo -e "${CYAN}${BOLD}Hostname:${NC}        $(hostname)"
+    echo -e "${CYAN}${BOLD}User:${NC}            $(whoami)"
+    echo -e "${CYAN}${BOLD}Date:${NC}            $(date +"%Y-%m-%d %H:%M:%S")"
+    
+    # Show disk space
+    DISK_INFO=$(df -h / | tail -n 1)
+    DISK_USED=$(echo "$DISK_INFO" | awk '{print $5}')
+    DISK_AVAIL=$(echo "$DISK_INFO" | awk '{print $4}')
+    
+    # Color coding for disk space
+    DISK_PERCENT_NUM=$(echo "$DISK_USED" | tr -d '%')
+    if [ "$DISK_PERCENT_NUM" -gt 90 ]; then
+        DISK_COLOR="${RED}${BOLD}"
+    elif [ "$DISK_PERCENT_NUM" -gt 75 ]; then
+        DISK_COLOR="${YELLOW}${BOLD}"
+    else
+        DISK_COLOR="${GREEN}${BOLD}"
+    fi
+    
+    echo -e "${CYAN}${BOLD}Disk Usage:${NC}       ${DISK_COLOR}$DISK_USED used, $DISK_AVAIL available${NC}"
+    
+    echo -e "\n${YELLOW}${BOLD}Select an option:${NC}"
+    echo -e "${WHITE}╔════╦════════════════════════════════════╗${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}1${NC}  ${WHITE}║${NC} ${CYAN}System Information${NC}                  ${WHITE}║${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}2${NC}  ${WHITE}║${NC} ${CYAN}Analyze Disk Usage${NC}                  ${WHITE}║${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}3${NC}  ${WHITE}║${NC} ${CYAN}Clean User Cache${NC}                    ${WHITE}║${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}4${NC}  ${WHITE}║${NC} ${CYAN}Clean Temporary Files${NC}               ${WHITE}║${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}5${NC}  ${WHITE}║${NC} ${CYAN}Clean Trash/Recycle Bin${NC}             ${WHITE}║${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}6${NC}  ${WHITE}║${NC} ${CYAN}Clean Logs${NC}                          ${WHITE}║${NC}"
+    echo -e "${WHITE}║${NC} ${GREEN}${BOLD}7${NC}  ${WHITE}║${NC} ${CYAN}Wi-Fi Diagnostics${NC}                   ${WHITE}║${NC}"
     
     # Show macOS-specific options
     if [ "$(uname)" = "Darwin" ]; then
-        echo -e "8. ${BOLD}Clean Time Machine Snapshots${NC}"
-        echo -e "9. ${BOLD}Clean macOS System Data${NC}"
+        echo -e "${WHITE}║${NC} ${GREEN}${BOLD}8${NC}  ${WHITE}║${NC} ${CYAN}Clean Time Machine Snapshots${NC}        ${WHITE}║${NC}"
+        echo -e "${WHITE}║${NC} ${GREEN}${BOLD}9${NC}  ${WHITE}║${NC} ${CYAN}Clean macOS System Data${NC}             ${WHITE}║${NC}"
     fi
     
-    echo -e "0. ${BOLD}Exit${NC}"
-    echo -e "${GREEN}${BOLD}=================================${NC}"
-    echo -e "Enter your choice: "
+    echo -e "${WHITE}║${NC} ${RED}${BOLD}0${NC}  ${WHITE}║${NC} ${RED}Exit${NC}                                ${WHITE}║${NC}"
+    echo -e "${WHITE}╚════╩════════════════════════════════════╝${NC}"
+    
+    # Show last action from the log if available
+    if [ -f "$CWD_LOG" ]; then
+        DELETION_COUNT=$(grep -c "DELETED:" "$CWD_LOG")
+        if [ "$DELETION_COUNT" -gt 0 ]; then
+            echo -e "\n${BLUE}${BOLD}Session summary:${NC} $DELETION_COUNT files deleted so far"
+            echo -e "${BLUE}${BOLD}Log file:${NC} $CWD_LOG"
+        fi
+    fi
+    
+    echo -e "\n${YELLOW}${BOLD}Enter your choice:${NC} "
 }
 
 # Set up trap to handle script interruption
@@ -705,16 +810,54 @@ trap "echo -e '\n${MAGENTA}${BOLD}🛑 Script interrupted${NC}'; exit 1" SIGINT 
 # Welcome message and main function
 main() {
     clear
-    echo -e "${GREEN}${BOLD}=================================================${NC}"
-    echo -e "${GREEN}${BOLD}        WELCOME TO SYSTEM CLEANUP UTILITY        ${NC}"
-    echo -e "${GREEN}${BOLD}=================================================${NC}"
-    echo -e "${BLUE}${BOLD}This utility helps clean temporary files and cache${NC}"
-    echo -e "${BLUE}${BOLD}directories on both Linux and macOS systems.      ${NC}"
-    echo -e "${GREEN}${BOLD}=================================================${NC}"
-    echo
+    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║             WELCOME TO SYSTEM CLEANUP UTILITY                ║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    
+    # Warning message
+    echo -e "\n${RED}${BOLD}⚠️  WARNING - PLEASE READ CAREFULLY${NC}"
+    echo -e "${YELLOW}This utility will delete files from your system. While it has been designed"
+    echo -e "with safety in mind, deleting system files always carries some risk."
+    echo -e "Possible consequences include:${NC}"
+    echo -e "  ${RED}• Loss of unsaved data${NC}"
+    echo -e "  ${RED}• Removal of application settings${NC}"
+    echo -e "  ${RED}• Potential issues with some applications${NC}"
+    echo -e "  ${RED}• Removal of cached content that will need to be re-downloaded${NC}"
+    
+    echo -e "\n${YELLOW}RECOMMENDED PRECAUTIONS:${NC}"
+    echo -e "  ${GREEN}• Backup important data before proceeding${NC}"
+    echo -e "  ${GREEN}• Close all running applications${NC}"
+    echo -e "  ${GREEN}• Review the logs after each operation${NC}"
+    echo -e "  ${GREEN}• Read confirmation prompts carefully${NC}"
+    
+    echo -e "\n${BLUE}${BOLD}This utility will:${NC}"
+    echo -e "  ${CYAN}• Show you what will be deleted before taking action${NC}"
+    echo -e "  ${CYAN}• Ask for confirmation before any deletion${NC}"
+    echo -e "  ${CYAN}• Log all actions to help track changes${NC}"
+    echo -e "  ${CYAN}• Protect sensitive system files${NC}"
+    
+    echo -e "\n${WHITE}${BOLD}Do you understand these risks and wish to continue? (y/n)${NC}"
+    read -p "> " consent
+    
+    if [[ "$consent" != [yY] ]]; then
+        echo -e "\n${CYAN}Script canceled. No changes were made to your system.${NC}"
+        exit 0
+    fi
+    
+    echo -e "\n${GREEN}${BOLD}Thank you. Let's proceed with the cleanup utility...${NC}"
+    sleep 1
     
     # Record script start
     log_operation "Script started by user $(whoami)"
+    
+    # Bug fix - ensure temp files are correctly handled
+    # Fix potential issue with file path handling containing spaces
+    IFS_OLD="$IFS"
+    IFS=
+
+# Start the script
+main
+\n'
     
     # Check for sudo
     check_sudo
@@ -760,6 +903,9 @@ main() {
                 # Count deletions 
                 DELETION_COUNT=$(grep -c "DELETED:" "$CWD_LOG")
                 echo "Total items deleted: $DELETION_COUNT" >> "$CWD_LOG"
+                
+                # Restore IFS
+                IFS="$IFS_OLD"
                 
                 # Print the location of the log file
                 echo -e "${GREEN}${BOLD}A log of all deletions has been saved to:${NC}"
