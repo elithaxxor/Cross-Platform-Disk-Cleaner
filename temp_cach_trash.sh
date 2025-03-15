@@ -4,6 +4,37 @@
 # Description: A cross-platform utility to clean temporary files
 # =====================================================================
 # **Color Codes for Terminal Output**
+
+echo 
+"The `temp_cach_trash.sh` file is a cross-platform system cleanup utility script written in Shell. Here is a summary of its main components:
+
+1. **Color Codes and Global Variables**:
+   - Defines color codes for terminal output.
+   - Sets flags for dry run mode (`DRY_RUN`) and auto-confirming prompts (`AUTO_CONFIRM`).
+
+2. **Logging Setup**:
+   - Creates logs for deletions, operations, and errors.
+   - Logs the current working directory and initiates a log file.
+
+3. **Functions**:
+   - `timestamp()`: Generates timestamps for logs.
+   - `log_operation()`, `log_error()`, `log_deletion()`: Functions for logging operations, errors, and deletions.
+   - `check_sudo()`: Checks if the script is run with `sudo`.
+   - `get_system_info()`: Gathers and logs system information.
+   - `safe_delete()`: Safely deletes files in specified directories after user confirmation.
+   - `analyze_disk_usage()`: Analyzes and logs disk usage.
+   - `clean_user_cache()`, `clean_temp_files()`, `clean_trash()`: Functions to clean user cache, temporary files, and trash respectively.
+   - `show_help()`: Displays a help menu with script usage instructions.
+
+4. **Main Function**:
+   - Displays a welcome message.
+   - Checks for `sudo` privileges.
+   - Parses command-line arguments to perform specified cleanup tasks or show help.
+   - Logs the script's start and termination.
+
+The script provides options to display system information, analyze disk usage, clean user cache, clean temporary files, clean trash, simulate cleanup without deleting, and auto-confirm all prompts.
+"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
