@@ -56,6 +56,17 @@ check_sudo() {
     fi
 }
 
+# Add a reusable function for privilege checks
+check_privileges() {
+    local operation="$1"
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "${YELLOW}${BOLD}Notice:${NC} $operation requires administrative privileges."
+        echo -e "Please run this script with sudo for this operation."
+        return 1
+    fi
+    return 0
+}
+
 # Function to get system information
 get_system_info() {
     # Create a header in the logs
@@ -68,11 +79,11 @@ get_system_info() {
     HOSTNAME=$(hostname)
     CURRENT_USER=$(whoami)
     UPTIME=$(uptime)
-    
+
     # Get CPU information
     if [ "$OS_TYPE" = "Darwin" ]; then
         # macOS
-        CPU_MODEL=$(sysctl -n machdep.cpu.brand_string)
+        CPU_MODEL=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || system_profiler SPHardwareDataType | grep "Processor Name" | cut -d ":" -f2 | sed 's/^[ \t]*//')
         CPU_CORES=$(sysctl -n hw.physicalcpu)
         CPU_THREADS=$(sysctl -n hw.logicalcpu)
         RAM_TOTAL=$(sysctl -n hw.memsize | awk '{print $0/1073741824}')
@@ -233,7 +244,7 @@ safe_delete() {
     # Confirm deletion
     echo -e "${YELLOW}${BOLD}Warning:${NC} About to delete $file_count files in $dir ($total_size)"
     read -p "Are you sure you want to proceed? (y/n): " confirm
-    if [[ "$confirm" != [yY] ]]; then
+    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         echo -e "${BLUE}${BOLD}Info:${NC} Deletion cancelled for $dir"
         log_operation "Deletion cancelled for $dir by user"
         echo "* Deletion cancelled by user" >> "$CWD_LOG"
@@ -245,31 +256,37 @@ safe_delete() {
     # Create header in deletion log
     echo "===== Deleting files from $dir on $(timestamp) =====" >> "$DELETION_LOG"
     
-    # Track deletion count for this operation
-    local deleted_count=0
-    local skipped_count=0
-    local error_count=0
+    # Fix for subshell variable issue with proper tracking of counts
+    local temp_file=$(mktemp)
+    echo "0 0 0" > "$temp_file"  # deleted, skipped, error counts
     
     # Loop through files instead of using rm -rf for more control
-    find "$dir" -type f | while read file; do
+    find "$dir" -type f | while read -r file; do
         # Skip files matching the skip pattern
         if [[ -n "$skip_pattern" && "$file" =~ $skip_pattern ]]; then
             echo -e "${YELLOW}${BOLD}Skipping protected file:${NC} $file"
-            ((skipped_count++))
+            # Update skipped count
+            awk '{print $1" "$2+1" "$3}' "$temp_file" > "${temp_file}.new" && mv "${temp_file}.new" "$temp_file"
         else
             # Delete the file and log it
             rm -f "$file" 2>/dev/null
             if [ $? -eq 0 ]; then
                 echo -e "${GREEN}${BOLD}Deleted:${NC} $file"
                 log_deletion "$file"
-                ((deleted_count++))
+                # Update deleted count
+                awk '{print $1+1" "$2" "$3}' "$temp_file" > "${temp_file}.new" && mv "${temp_file}.new" "$temp_file"
             else
                 echo -e "${RED}${BOLD}Failed to delete:${NC} $file"
                 log_error "Failed to delete: $file"
-                ((error_count++))
+                # Update error count
+                awk '{print $1" "$2" "$3+1}' "$temp_file" > "${temp_file}.new" && mv "${temp_file}.new" "$temp_file"
             fi
         fi
     done
+    
+    # Read counts from temp file
+    read deleted_count skipped_count error_count < "$temp_file"
+    rm -f "$temp_file"
     
     # Also clean empty directories
     find "$dir" -type d -empty -delete 2>/dev/null
@@ -340,11 +357,15 @@ clean_temp_files() {
     if [ "$(uname)" = "Darwin" ]; then
         # macOS
         safe_delete "/tmp" "temporary files" ".*\.(plist|app)$"
-        safe_delete "/private/var/tmp" "system temporary files" ".*\.(plist|app)$"
+        if check_privileges "System temporary files cleaning"; then
+            safe_delete "/private/var/tmp" "system temporary files" ".*\.(plist|app)$"
+        fi
     else
         # Linux
         safe_delete "/tmp" "temporary files" ".*\.(conf|log)$"
-        safe_delete "/var/tmp" "system temporary files" ".*\.(conf|log)$"
+        if check_privileges "System temporary files cleaning"; then
+            safe_delete "/var/tmp" "system temporary files" ".*\.(conf|log)$"
+        fi
     fi
 }
 
@@ -366,14 +387,17 @@ clean_logs() {
         safe_delete "$HOME/Library/Logs" "user logs" ".*System.*"
     else
         # Linux
-        # Most Linux logs need sudo access
         echo -e "${YELLOW}${BOLD}Note:${NC} Cleaning system logs typically requires sudo privileges."
-        echo -e "This option will only clean logs the current user has permission to modify."
         
-        if [ -d "$HOME/.local/share/logs" ]; then
-            safe_delete "$HOME/.local/share/logs" "user logs" ""
+        if check_privileges "System log cleaning"; then
+            safe_delete "/var/log" "system logs" ".*\.gz$"
         else
-            echo -e "${YELLOW}${BOLD}Notice:${NC} No user logs directory found."
+            echo -e "This option will only clean logs the current user has permission to modify."
+            if [ -d "$HOME/.local/share/logs" ]; then
+                safe_delete "$HOME/.local/share/logs" "user logs" ""
+            else
+                echo -e "${YELLOW}${BOLD}Notice:${NC} No user logs directory found."
+            fi
         fi
     fi
 }
@@ -410,13 +434,13 @@ clean_macos_system_data() {
         echo
         
         read -p "Would you like to see the list of backups? (y/n): " show_backups
-        if [[ "$show_backups" == [yY] ]]; then
+        if [[ "$show_backups" =~ ^[yY]$ ]]; then
             echo
             ls -la "$HOME/Library/Application Support/MobileSync/Backup"
             echo
             
             read -p "Would you like to delete these backups? (y/n): " delete_backups
-            if [[ "$delete_backups" == [yY] ]]; then
+            if [[ "$delete_backups" =~ ^[yY]$ ]]; then
                 safe_delete "$HOME/Library/Application Support/MobileSync/Backup" "iOS device backups" ""
             fi
         fi
@@ -430,7 +454,7 @@ clean_macos_system_data() {
         echo -e "XCode Developer Cache: ${YELLOW}${BOLD}$XCODE_SIZE${NC}"
         
         read -p "Would you like to clean XCode caches? (y/n): " clean_xcode
-        if [[ "$clean_xcode" == [yY] ]]; then
+        if [[ "$clean_xcode" =~ ^[yY]$ ]]; then
             safe_delete "$HOME/Library/Developer/Xcode/DerivedData" "XCode derived data" ""
             safe_delete "$HOME/Library/Developer/Xcode/Archives" "XCode archives" ""
             safe_delete "$HOME/Library/Developer/Xcode/iOS DeviceSupport" "iOS device support files" ""
@@ -443,7 +467,7 @@ clean_macos_system_data() {
         echo -e "iOS Simulator Data: ${YELLOW}${BOLD}$SIM_SIZE${NC}"
         
         read -p "Would you like to clean simulator data? (y/n): " clean_sim
-        if [[ "$clean_sim" == [yY] ]]; then
+        if [[ "$clean_sim" =~ ^[yY]$ ]]; then
             if command -v xcrun &>/dev/null; then
                 echo -e "Cleaning simulator data using xcrun..."
                 xcrun simctl delete unavailable
@@ -461,12 +485,9 @@ clean_macos_system_data() {
         echo -e "  Note: These are used for document versioning. Cleaning may affect document history."
         
         read -p "Would you like to clean document revisions? (y/n): " clean_revs
-        if [[ "$clean_revs" == [yY] ]]; then
-            if [ "$EUID" -eq 0 ]; then
+        if [[ "$clean_revs" =~ ^[yY]$ ]]; then
+            if check_privileges "Document revisions cleanup"; then
                 safe_delete "$HOME/.DocumentRevisions-V100/PerUID" "document revisions" ""
-            else
-                echo -e "${YELLOW}${BOLD}Notice:${NC} Administrative privileges required for this operation."
-                echo -e "Please run this script with sudo to clean document revisions."
             fi
         fi
     fi
@@ -477,12 +498,9 @@ clean_macos_system_data() {
         echo -e "Software Update Downloads: ${YELLOW}${BOLD}$UPDATES_SIZE${NC}"
         
         read -p "Would you like to clean software update downloads? (y/n): " clean_updates
-        if [[ "$clean_updates" == [yY] ]]; then
-            if [ "$EUID" -eq 0 ]; then
+        if [[ "$clean_updates" =~ ^[yY]$ ]]; then
+            if check_privileges "Software update downloads cleanup"; then
                 safe_delete "/Library/Updates" "software update downloads" ""
-            else
-                echo -e "${YELLOW}${BOLD}Notice:${NC} Administrative privileges required for this operation."
-                echo -e "Please run this script with sudo to clean software update downloads."
             fi
         fi
     fi
@@ -493,7 +511,7 @@ clean_macos_system_data() {
         echo -e "Mail Downloads: ${YELLOW}${BOLD}$MAIL_SIZE${NC}"
         
         read -p "Would you like to clean mail downloads? (y/n): " clean_mail
-        if [[ "$clean_mail" == [yY] ]]; then
+        if [[ "$clean_mail" =~ ^[yY]$ ]]; then
             safe_delete "$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads" "mail downloads" ""
         fi
     fi
@@ -504,7 +522,7 @@ clean_macos_system_data() {
         echo -e "Safari Cache: ${YELLOW}${BOLD}$SAFARI_SIZE${NC}"
         
         read -p "Would you like to clean Safari cache? This will clear your browsing history (y/n): " clean_safari
-        if [[ "$clean_safari" == [yY] ]]; then
+        if [[ "$clean_safari" =~ ^[yY]$ ]]; then
             safe_delete "$HOME/Library/Safari/LocalStorage" "safari local storage" ""
             safe_delete "$HOME/Library/Safari/Databases" "safari databases" ""
             safe_delete "$HOME/Library/Safari/Cache.db" "safari cache database" ""
@@ -523,7 +541,7 @@ clean_macos_system_data() {
     
     # Application Support caches
     echo -e "\n${CYAN}${BOLD}Checking for large Application Support caches...${NC}"
-    find "$HOME/Library/Application Support" -type d -mindepth 1 -maxdepth 1 | while read dir; do
+    find "$HOME/Library/Application Support" -type d -mindepth 1 -maxdepth 1 | while read -r dir; do
         dir_size=$(du -sm "$dir" 2>/dev/null | awk '{print $1}')
         
         # Only show directories larger than 100MB
@@ -535,7 +553,7 @@ clean_macos_system_data() {
     
     echo
     read -p "Would you like to selectively clean large application caches? (y/n): " clean_app_cache
-    if [[ "$clean_app_cache" == [yY] ]]; then
+    if [[ "$clean_app_cache" =~ ^[yY]$ ]]; then
         echo -e "Enter the name of the application cache to clean (or 'done' to finish):"
         while true; do
             read app_name
@@ -561,7 +579,7 @@ clean_macos_system_data() {
                 else
                     # For other apps, ask which subdirectories to clean
                     echo -e "Subdirectories in $app_name:"
-                    find "$HOME/Library/Application Support/$app_name" -type d -mindepth 1 -maxdepth 1 | while read subdir; do
+                    find "$HOME/Library/Application Support/$app_name" -type d -mindepth 1 -maxdepth 1 | while read -r subdir; do
                         subdir_name=$(basename "$subdir")
                         subdir_size=$(du -sh "$subdir" 2>/dev/null | awk '{print $1}')
                         echo -e "  $subdir_name: $subdir_size"
@@ -591,10 +609,10 @@ clean_macos_system_data() {
     echo -e "Applications contain resources for many languages, which can take up space."
     read -p "Would you like to list applications with their language resource sizes? (y/n): " list_langs
     
-    if [[ "$list_langs" == [yY] ]]; then
+    if [[ "$list_langs" =~ ^[yY]$ ]]; then
         echo -e "\nThis may take a while to analyze..."
         
-        find /Applications -type d -name "*.app" -maxdepth 2 | while read app; do
+        find /Applications -type d -name "*.app" -maxdepth 2 | while read -r app; do
             app_name=$(basename "$app" .app)
             
             # Check if this app has language resources
@@ -617,12 +635,11 @@ clean_macos_system_data() {
         echo -e "It's recommended to only remove languages you don't use from apps you don't need localized."
         echo -e "This requires administrative privileges."
         
-        if [ "$EUID" -ne 0 ]; then
-            echo -e "${RED}${BOLD}This operation requires sudo privileges.${NC}"
+        if ! check_privileges "Language resource cleanup"; then
             echo -e "Please run the script with sudo to perform language resource cleanup."
         else
             read -p "Do you want to remove non-English language resources from an application? (y/n): " clean_langs
-            if [[ "$clean_langs" == [yY] ]]; then
+            if [[ "$clean_langs" =~ ^[yY]$ ]]; then
                 echo -e "Enter the exact name of the application (e.g., 'Firefox'):"
                 read target_app
                 
@@ -669,7 +686,7 @@ clean_time_machine_snapshots() {
     # Ask for confirmation
     echo
     read -p "Do you want to delete all local Time Machine snapshots? (y/n): " confirm
-    if [[ "$confirm" != [yY] ]]; then
+    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
         echo -e "${BLUE}${BOLD}Info:${NC} Snapshot deletion cancelled."
         log_operation "Time Machine snapshot deletion cancelled by user"
         read -p "Press Enter to continue..."
@@ -677,14 +694,11 @@ clean_time_machine_snapshots() {
     fi
     
     # Run with sudo if available
-    if [ "$EUID" -eq 0 ]; then
+    if check_privileges "Time Machine snapshot deletion"; then
         log_operation "Deleting all Time Machine snapshots"
         echo -e "${GREEN}${BOLD}Deleting all Time Machine snapshots...${NC}"
         tmutil deletelocalsnapshots / &>/dev/null
         echo -e "${GREEN}${BOLD}Done!${NC}"
-    else
-        echo -e "${YELLOW}${BOLD}Notice:${NC} Administrative privileges required for this operation."
-        echo -e "Please run this script with sudo to delete Time Machine snapshots."
     fi
     
     log_operation "Time Machine snapshot cleanup completed"
@@ -705,7 +719,10 @@ scan_wifi() {
         AIRPORT="/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
         
         if [ -x "$AIRPORT" ]; then
-            "$AIRPORT" -s
+            if ! "$AIRPORT" -s; then
+                echo -e "${RED}${BOLD}Error:${NC} Failed to scan Wi-Fi networks."
+                log_error "Airport scan failed"
+            fi
         else
             echo -e "${RED}${BOLD}Error:${NC} Airport utility not found."
             log_error "Airport utility not found at $AIRPORT"
@@ -728,7 +745,7 @@ scan_wifi() {
         if command -v iwlist &>/dev/null; then
             echo -e "${CYAN}${BOLD}Using interface:${NC} $WIRELESS_INTERFACE"
             
-            if [ "$EUID" -eq 0 ]; then
+            if check_privileges "Wi-Fi scanning"; then
                 iwlist "$WIRELESS_INTERFACE" scan | grep -E "ESSID|Quality|Channel"
             else
                 echo -e "${YELLOW}${BOLD}Note:${NC} For better results, run with sudo."
@@ -805,10 +822,10 @@ show_menu() {
     echo -e "\n${YELLOW}${BOLD}Enter your choice:${NC} "
 }
 
-# Set up trap to handle script interruption
-trap "echo -e '\n${MAGENTA}${BOLD}🛑 Script interrupted${NC}'; exit 1" SIGINT SIGTERM
+# Set up trap to handle script interruption with proper cleanup
+trap 'IFS="$IFS_OLD"; echo -e "\n${MAGENTA}${BOLD}🛑 Script interrupted${NC}"; exit 1' SIGINT SIGTERM
 
-# Welcome message and main function
+# Main function
 main() {
     clear
     echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -840,7 +857,7 @@ main() {
     echo -e "\n${WHITE}${BOLD}Do you understand these risks and wish to continue? (y/n)${NC}"
     read -p "> " consent
     
-    if [[ "$consent" != [yY] ]]; then
+    if [[ ! "$consent" =~ ^[yY]$ ]]; then
         echo -e "\n${CYAN}Script canceled. No changes were made to your system.${NC}"
         exit 0
     fi
@@ -851,14 +868,9 @@ main() {
     # Record script start
     log_operation "Script started by user $(whoami)"
     
-    # Bug fix - ensure temp files are correctly handled
-    # Fix potential issue with file path handling containing spaces
+    # Backup IFS to handle paths with spaces correctly
     IFS_OLD="$IFS"
-    IFS=
-
-# Start the script
-main
-\n'
+    # We're not changing IFS by default, just backing it up for safety
     
     # Check for sudo
     check_sudo
