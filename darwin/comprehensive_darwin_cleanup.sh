@@ -3,10 +3,7 @@
 # System Cleanup Utility
 # Description: A cross-platform utility to clean temporary files
 #              and cache directories on Linux and macOS systems.
-# Author: Your Name
-# Version: 1.1
-# License: MIT
-#=====================================================================
+
 
 # **Color Codes for Terminal Output**
 RED='\033[0;31m'
